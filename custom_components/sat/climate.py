@@ -833,6 +833,8 @@ class ClimateController:
 
         self._coordinator = coordinator
 
+        self.reset()
+
     def reset(self):
         self._kf = KalmanFilter(dim_x=3, dim_z=2)
         self._kf.x = np.array([[self.current_temperature(True)], [self._boiler_temperature()], [0]])
