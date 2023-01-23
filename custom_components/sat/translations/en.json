@@ -64,6 +64,7 @@
           "sample_time": "Sample Time",
           "climate_valve_offset": "Climate valve offset",
           "sensor_max_value_age": "Sensor max. value age",
+          "kalman_enabled": "Predict Temperature Values (experimental)",
           "overshoot_protection": "Overshoot Protection (experimental)",
           "min_num_updates": "Minimum number of updates required for auto-tuning"
         }

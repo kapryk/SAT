@@ -195,6 +195,7 @@ class SatOptionsFlowHandler(config_entries.OptionsFlow):
             step_id="advanced",
             data_schema=vol.Schema({
                 vol.Required(CONF_SIMULATION, default=defaults[CONF_SIMULATION]): bool,
+                vol.Required(CONF_KALMAN_ENABLED, default=defaults[CONF_KALMAN_ENABLED]): bool,
                 vol.Required(CONF_OVERSHOOT_PROTECTION, default=defaults[CONF_OVERSHOOT_PROTECTION]): bool,
                 vol.Required(CONF_CLIMATE_VALVE_OFFSET, default=defaults[CONF_CLIMATE_VALVE_OFFSET]): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=-1, max=1, step=0.1)

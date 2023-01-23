@@ -6,6 +6,8 @@ from statistics import mean
 from time import time
 from typing import List, Optional, Any
 
+import numpy as np
+from filterpy.kalman import KalmanFilter
 from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,
@@ -27,7 +29,7 @@ from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.components.weather import DOMAIN as WEATHER_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, STATE_UNAVAILABLE, STATE_UNKNOWN, ATTR_ENTITY_ID
-from homeassistant.core import HomeAssistant, ServiceCall, Event
+from homeassistant.core import HomeAssistant, ServiceCall, Event, State
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt
@@ -140,6 +142,7 @@ class SatClimate(SatEntity, ClimateEntity, RestoreEntity):
         if inside_sensor_entity is not None and inside_sensor_entity.state not in [STATE_UNKNOWN, STATE_UNAVAILABLE]:
             self._current_temperature = float(inside_sensor_entity.state)
 
+        self._kfs = {}
         self._sensors = []
         self._setpoint = None
         self._is_device_active = False
@@ -149,13 +152,15 @@ class SatClimate(SatEntity, ClimateEntity, RestoreEntity):
         self._target_temperature = None
         self._saved_target_temperature = None
 
-        self._overshoot_protection_active = False
         self._overshoot_protection_data = []
+        self._overshoot_protection_active = False
 
+        self._climate_controllers = {}
         self._climates = options.get(CONF_CLIMATES)
         self._main_climates = options.get(CONF_MAIN_CLIMATES)
 
         self._simulation = options.get(CONF_SIMULATION)
+        self._kf_enabled = options.get(CONF_KALMAN_ENABLED)
         self._heating_system = options.get(CONF_HEATING_SYSTEM)
         self._overshoot_protection = options.get(CONF_OVERSHOOT_PROTECTION)
         self._climate_valve_offset = options.get(CONF_CLIMATE_VALVE_OFFSET)
@@ -412,25 +417,18 @@ class SatClimate(SatEntity, ClimateEntity, RestoreEntity):
 
     @property
     def climate_errors(self) -> List[float]:
-        """Calculate the temperature difference between the current temperature and target temperature for all connected climates."""
         errors = []
         for climate in self._climates:
-            # Skip if climate state is unavailable or HVAC mode is off
-            state = self.hass.states.get(climate)
-            if state is None or state.state in [STATE_UNKNOWN, STATE_UNAVAILABLE, HVACMode.OFF]:
-                continue
+            if climate not in self._climate_controllers:
+                self._climate_controllers[climate] = ClimateController(
+                    self.hass,
+                    self._coordinator,
+                    climate,
+                    self._kf_enabled
+                )
 
-            # Calculate temperature difference for this climate
-            target_temperature = float(state.attributes.get("temperature"))
-            current_temperature = float(state.attributes.get("current_temperature") or target_temperature)
-
-            # Retrieve the overriden sensor temperature if set
-            if sensor_temperature_id := state.attributes.get(SENSOR_TEMPERATURE_ID):
-                sensor_state = self.hass.states.get(sensor_temperature_id)
-                if sensor_state is not None and sensor_state.state not in [STATE_UNKNOWN, STATE_UNAVAILABLE, HVACMode.OFF]:
-                    current_temperature = float(sensor_state.state)
-
-            errors.append(round(target_temperature - current_temperature, 2))
+            controller = self._climate_controllers[climate]
+            errors.append(round(controller.current_temperature(), 2))
 
         return errors
 
@@ -825,3 +823,64 @@ class SatClimate(SatEntity, ClimateEntity, RestoreEntity):
         # Update the state and control the heating
         self.async_write_ha_state()
         await self._async_control_heating()
+
+
+class ClimateController:
+    def __init__(self, hass: HomeAssistant, coordinator: SatDataUpdateCoordinator, entity_id: str, kalman_filter_enabled: bool):
+        self.hass = hass
+        self.entity_id = entity_id
+        self.kalman_filter_enabled = kalman_filter_enabled
+
+        self._coordinator = coordinator
+
+    def reset(self):
+        self._kf = KalmanFilter(dim_x=3, dim_z=2)
+        self._kf.x = np.array([[self.current_temperature(True)], [self._boiler_temperature()], [0]])
+        self._kf.F = np.array([[1., 1., 0.], [0., 1., 0.], [0., 0., 1.]])
+        self._kf.H = np.array([[1., 0., 0.], [0., 1., 0.]])
+        self._kf.R = np.array([[0.1, 0.], [0., 0.1]])
+        self._kf.Q = np.array([[0.1, 0., 0.], [0., 0.1, 0.], [0., 0., 0.1]])
+
+        self._last_state = None
+
+    def current_temperature(self, force: bool = False):
+        # Skip if climate state is unavailable or HVAC mode is off
+        climate_state = self.hass.states.get(self.entity_id)
+        if not self._is_valid_state(climate_state):
+            return None
+
+        state = climate_state
+        attributes = climate_state.attributes
+        target_temperature = float(attributes.get("temperature"))
+        current_temperature = float(attributes.get("current_temperature") or target_temperature)
+
+        current_boiler_temperature = self._boiler_temperature()
+        if current_boiler_temperature is None:
+            return None
+
+        # Retrieve the overriden sensor temperature if set
+        if sensor_temperature_id := climate_state.attributes.get(SENSOR_TEMPERATURE_ID):
+            sensor_state = self.hass.states.get(sensor_temperature_id)
+            if self._is_valid_state(sensor_state):
+                state = sensor_state
+                current_temperature = float(sensor_state.state)
+
+        if self.kalman_filter_enabled and not force:
+            # Update kf when we receive a new state
+            if self._last_state != state:
+                self._kf.update(np.array([current_temperature, current_boiler_temperature]))
+                self._last_state = state
+
+            # Predict the temperature instead if it's more than 5 minutes ago
+            elif time() - state.last_updated > 300:
+                self._kf.predict()
+                current_temperature = self._kf.x[0][0]
+
+        return current_temperature
+
+    @staticmethod
+    def _is_valid_state(state: Optional[State]):
+        return state is not None and state.state not in [STATE_UNKNOWN, STATE_UNAVAILABLE, HVACMode.OFF]
+
+    def _boiler_temperature(self):
+        return self._coordinator.data[gw_vars.BOILER].get(gw_vars.DATA_CH_WATER_TEMP) if self._coordinator.data[gw_vars.BOILER] else None

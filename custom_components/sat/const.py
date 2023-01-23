@@ -41,6 +41,7 @@ CONF_INTEGRAL = "integral"
 CONF_DERIVATIVE = "derivative"
 CONF_PROPORTIONAL = "proportional"
 CONF_SAMPLE_TIME = "sample_time"
+CONF_KALMAN_ENABLED = "kalman_enabled"
 CONF_CLIMATE_VALVE_OFFSET = "climate_valve_offset"
 CONF_SENSOR_MAX_VALUE_AGE = "sensor_max_value_age"
 CONF_OVERSHOOT_PROTECTION = "overshoot_protection"
@@ -65,6 +66,7 @@ OPTIONS_DEFAULTS = {
     CONF_PROPORTIONAL: "45",
     CONF_INTEGRAL: "0",
     CONF_DERIVATIVE: "6000",
+    CONF_KALMAN_ENABLED: False,
 
     CONF_CLIMATES: [],
     CONF_MAIN_CLIMATES: [],
